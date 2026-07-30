@@ -5,68 +5,87 @@ import json
 import re
 from dotenv import load_dotenv
 
-# ---------- Load environment variables ----------
 load_dotenv()
 
 app = Flask(__name__)
 
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL = os.environ.get(
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_MODEL = os.getenv(
     "OPENROUTER_MODEL",
     "meta-llama/llama-3.1-8b-instruct:free"
 )
+
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
+
 SYSTEM_PROMPT = """
-You are an expert professional chef and recipe writer.
+You are an expert chef.
 
-Generate ONE personalized recipe.
+Generate exactly ONE recipe.
 
-Return ONLY valid JSON.
+Return ONLY JSON.
+No markdown.
+No explanation.
+
+JSON format:
 
 {
-  "dish_name":"",
-  "short_description":"",
-  "cuisine":"",
-  "difficulty":"",
-  "prep_time_minutes":0,
-  "cook_time_minutes":0,
-  "servings":0,
-  "ingredients_used":[],
-  "additional_ingredients_needed":[],
-  "steps":[],
-  "tips":""
+"dish_name":"",
+"short_description":"",
+"cuisine":"",
+"difficulty":"",
+"prep_time_minutes":0,
+"cook_time_minutes":0,
+"servings":0,
+"ingredients_used":[],
+"additional_ingredients_needed":[],
+"steps":[],
+"tips":""
 }
 """
 
 
-def build_user_prompt(ingredients, diet, cuisine, cooking_time, skill_level):
+def build_prompt(data):
+
     return f"""
-Available ingredients: {ingredients}
+Ingredients:
+{data.get("ingredients")}
 
-Dietary preference: {diet}
+Diet:
+{data.get("diet")}
 
-Cuisine: {cuisine}
+Cuisine:
+{data.get("cuisine")}
 
-Cooking Time: {cooking_time}
+Cooking Time:
+{data.get("cooking_time")}
 
-Skill Level: {skill_level}
+Skill Level:
+{data.get("skill_level")}
 """
 
 
 def extract_json(text):
+
     text = text.strip()
 
-    if text.startswith("```"):
-        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
-        text = re.sub(r"```$", "", text).strip()
+    text = re.sub(
+        r"```json|```",
+        "",
+        text
+    ).strip()
 
-    match = re.search(r"\{.*\}", text, re.DOTALL)
+    match = re.search(
+        r"\{.*\}",
+        text,
+        re.DOTALL
+    )
 
     if match:
-        text = match.group(0)
+        text = match.group()
 
     return json.loads(text)
+
 
 
 @app.route("/")
@@ -74,77 +93,115 @@ def home():
     return render_template("index.html")
 
 
+
 @app.route("/generate", methods=["POST"])
 def generate():
 
-    if not OPENROUTER_API_KEY:
-        return jsonify({"error": "OPENROUTER_API_KEY not found"}), 500
-
-    data = request.get_json()
-
-    ingredients = data.get("ingredients", "")
-    diet = data.get("diet", "Any")
-    cuisine = data.get("cuisine", "Any")
-    cooking_time = data.get("cooking_time", "30 Minutes")
-    skill_level = data.get("skill_level", "Beginner")
-
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json"
-    }
-
-    payload = {
-        "model": OPENROUTER_MODEL,
-        "messages": [
-            {
-                "role": "system",
-                "content": SYSTEM_PROMPT
-            },
-            {
-                "role": "user",
-                "content": build_user_prompt(
-                    ingredients,
-                    diet,
-                    cuisine,
-                    cooking_time,
-                    skill_level
-                )
-            }
-        ],
-        "temperature": 0.7
-    }
-
     try:
+
+        if not OPENROUTER_API_KEY:
+            return jsonify({
+                "error":"API key missing"
+            }),500
+
+
+        data = request.get_json()
+
+        headers = {
+            "Authorization":
+            f"Bearer {OPENROUTER_API_KEY}",
+
+            "Content-Type":
+            "application/json"
+        }
+
+
+        payload = {
+
+            "model": OPENROUTER_MODEL,
+
+            "messages":[
+
+                {
+                    "role":"system",
+                    "content":SYSTEM_PROMPT
+                },
+
+                {
+                    "role":"user",
+                    "content":build_prompt(data)
+                }
+
+            ],
+
+            "temperature":0.8
+        }
+
 
         response = requests.post(
             OPENROUTER_URL,
             headers=headers,
             json=payload,
-            timeout=60
+            timeout=90
         )
 
-        response.raise_for_status()
+
+        if response.status_code != 200:
+
+            return jsonify({
+                "error":response.text
+            }),response.status_code
+
+
 
         result = response.json()
 
-        recipe = extract_json(
-            result["choices"][0]["message"]["content"]
+
+        content = (
+            result["choices"][0]
+            ["message"]
+            ["content"]
         )
 
-        image_prompt = requests.utils.quote(
-            recipe["dish_name"] + " food photography"
-        )
+
+        recipe = extract_json(content)
+
 
         recipe["image_url"] = (
-            f"https://image.pollinations.ai/prompt/"
-            f"{image_prompt}?width=800&height=600"
+            "https://image.pollinations.ai/prompt/"
+            + requests.utils.quote(
+                recipe.get("dish_name","food")
+                + " realistic food photography"
+            )
+            + "?width=800&height=600"
         )
+
 
         return jsonify(recipe)
 
+
+
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+
+        print("ERROR:",e)
+
+        return jsonify({
+            "error":str(e)
+        }),500
+
+
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+
+    port = int(
+        os.environ.get(
+            "PORT",
+            5000
+        )
+    )
+
+    app.run(
+        host="0.0.0.0",
+        port=port
+    )
